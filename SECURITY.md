@@ -23,6 +23,7 @@ Only the latest release receives security fixes.
 - Reading files or data outside what the README documents (path traversal, sandbox escape, `cmdline`/`environ` disclosure).
 - Changing the system in any way: writes, starting or stopping units, executing programs.
 - Making the server reflect attacker-chosen text in errors, or crash or hang beyond the documented bounds.
+- Bypassing the dashboard's token, Host check or loopback-only listener.
 
 ## Out of scope
 

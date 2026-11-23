@@ -37,7 +37,7 @@ At startup, before any tool is registered, the process confines itself with [Lan
 | read `/etc/os-release` | any write, create, delete or truncate, everywhere |
 | `connect(2)` to `/run/dbus/system_bus_socket` (ABI ≥ 9; older ABIs don't restrict UNIX sockets) | any other pathname UNIX socket (ABI ≥ 9) |
 | | executing files |
-| | TCP bind/connect (Landlock ABI ≥ 4), UDP (ABI ≥ 10) |
+| | classic TCP bind/connect (Landlock ABI ≥ 4), UDP (ABI ≥ 10); Multipath TCP is not restricted at any ABI |
 | | abstract UNIX sockets and signals outside the sandbox (ABI ≥ 6) |
 
 The systemd tools always dial the system bus at that fixed path, ignoring `DBUS_SYSTEM_BUS_ADDRESS` (where `autolaunch:` would run `dbus-launch` and `tcp:` would open the network), and authenticate with `EXTERNAL` only. They call read-only methods: the D-Bus interface the code depends on has no method that starts, stops or reloads units. Note: the godbus dependency links `os/exec` for session-bus autolaunch, a path this server never takes; Landlock grants no execute right anywhere, so it could not run a binary anyway.
@@ -228,6 +228,7 @@ Out of scope: an attacker who is already root, a compromised kernel, and the hol
 - **The information is the product.** Process names, ports, mounts, interfaces and unit names describe the host to whoever can connect, so the access control is who can run the server: the SSH key or the socket group. With `/proc` mounted `hidepid=2`, an unprivileged server sees only its own processes. That is by design: don't run it as root.
 - **Printable text still reaches the model.** A 15-character process name like `ignore_previous` passes sanitizing. The client has to treat tool output as data.
 - **A call that times out keeps running in the background** until the code it is stuck in returns. The client gets its answer on time, but repeated calls stuck that way (for example statfs on a dead NFS mount) can pile up. v1 has no rate limit; under systemd, `TasksMax` and `MemoryMax` bound the damage.
+- **Landlock doesn't restrict Multipath TCP**, which Go uses by default for `net.Listen` since 1.24. Inside the sandbox a new MPTCP socket can still bind; the sandbox test logs this on every run. The server code never opens a socket, so this matters only if an attacker already runs code in the process. The systemd unit's `RestrictAddressFamilies=AF_UNIX` blocks it there.
 - **Landlock depends on the kernel.** ABI < 4 doesn't restrict TCP, and ABI < 9 doesn't restrict connecting to UNIX sockets by path (the unit's `RestrictAddressFamilies=AF_UNIX` still blocks IP). The sandbox test runs in CI (GitHub runner, ABI 8) and on the development kernel (ABI 4), and logs the ABI it ran on. Neither enforces the ABI ≥ 9 D-Bus rule yet, so that rule is still unproven. Without Landlock and without `--require-sandbox`, the server runs unsandboxed and logs a warning.
 - **The dashboard token is a bearer secret.** Anyone who sees the printed URL (terminal scrollback, a shared screen, another local user reading your terminal) can read the data until the program stops. Any local process can connect to the port, but without the token it gets only the empty page.
 - **The godbus dependency links `os/exec`** for session-bus autolaunch. This server never takes that code path, and Landlock would deny the execution anyway.

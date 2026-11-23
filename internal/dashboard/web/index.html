@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>linux-diag Host Monitor</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<main class="wrap">
+  <header>
+    <div class="titlebar">
+      <h1>linux-diag Host Monitor</h1>
+      <p class="live" id="live" role="status" aria-live="polite"><span class="dot"></span><span id="live-text">Connecting…</span></p>
+    </div>
+    <p class="sub" id="sub">—</p>
+    <p class="take" id="take"></p>
+  </header>
+
+  <p class="banner" id="banner" hidden></p>
+
+  <section class="tiles" id="tiles" aria-label="Headline figures"></section>
+
+  <div class="grid2">
+    <section class="card" id="cpu">
+      <h2>CPU per logical core</h2>
+      <p class="note">Share of the last sample each core spent busy.</p>
+      <div class="chart" id="cpu-chart"></div>
+    </section>
+    <section class="card" id="memory">
+      <h2>Memory</h2>
+      <p class="note" id="mem-note"></p>
+      <div class="chart" id="mem-bar"></div>
+      <dl class="kv" id="mem-kv"></dl>
+    </section>
+  </div>
+
+  <section class="card" id="filesystems">
+    <h2>Filesystems</h2>
+    <div class="tw"><table id="t-disks" aria-label="Filesystems"></table></div>
+  </section>
+
+  <div class="grid2">
+    <section class="card" id="procs-cpu">
+      <h2>Top processes by CPU</h2>
+      <div class="tw"><table id="t-pcpu" aria-label="Top processes by CPU"></table></div>
+      <p class="note">CPU % counts one core as 100, so a process using several cores can pass 100.</p>
+    </section>
+    <section class="card" id="procs-mem">
+      <h2>Top processes by memory</h2>
+      <div class="tw"><table id="t-pmem" aria-label="Top processes by memory"></table></div>
+      <p class="note">RSS counts shared pages in every process that maps them, so these rows add up to more than the memory actually used.</p>
+    </section>
+  </div>
+
+  <div class="grid2">
+    <section class="card" id="ports">
+      <h2>Listening ports</h2>
+      <div class="tw"><table id="t-ports" aria-label="Listening ports"></table></div>
+      <p class="note">Sockets come from /proc/net and are not mapped to processes. This dashboard's own port appears here too.</p>
+    </section>
+    <section class="card" id="network">
+      <h2>Network interfaces</h2>
+      <div class="tw"><table id="t-net" aria-label="Network interfaces"></table></div>
+      <p class="note">Counters since boot. Rates are measured between the last two updates.</p>
+    </section>
+  </div>
+
+  <section class="card" id="failed-units">
+    <h2>Failed systemd units</h2>
+    <div class="tw"><table id="t-units" aria-label="Failed systemd units"></table></div>
+    <p class="note">Result and unit file come from service_status, which only reads .service units.</p>
+  </section>
+
+  <details id="about">
+    <summary>About this dashboard</summary>
+    <p>linux-diag-dashboard runs the linux-diag MCP server in-process and calls its read-only tools on a fixed schedule. It listens on 127.0.0.1 only, inside the same Landlock sandbox as the server. The data endpoint answers only requests that carry the access token from the URL it printed at startup.</p>
+    <ul>
+      <li>CPU figures come from one short sample per update, so a single reading can catch a spike. The small line under each headline figure shows the readings since this page was opened.</li>
+      <li>Memory used is total minus available. Page cache counts as available because the kernel frees it when programs need it.</li>
+      <li>Process state: R running, S sleeping, I idle kernel thread, D waiting on I/O.</li>
+    </ul>
+  </details>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

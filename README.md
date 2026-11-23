@@ -37,7 +37,7 @@ At startup, before any tool is registered, the process confines itself with [Lan
 | read `/etc/os-release` | any write, create, delete or truncate, everywhere |
 | `connect(2)` to `/run/dbus/system_bus_socket` (ABI ≥ 9; older ABIs don't restrict UNIX sockets) | any other pathname UNIX socket (ABI ≥ 9) |
 | | executing files |
-| | TCP bind/connect (Landlock ABI ≥ 4), UDP (ABI ≥ 10) |
+| | classic TCP bind/connect (Landlock ABI ≥ 4), UDP (ABI ≥ 10); Multipath TCP is not restricted at any ABI |
 | | abstract UNIX sockets and signals outside the sandbox (ABI ≥ 6) |
 
 The systemd tools always dial the system bus at that fixed path, ignoring `DBUS_SYSTEM_BUS_ADDRESS` (where `autolaunch:` would run `dbus-launch` and `tcp:` would open the network), and authenticate with `EXTERNAL` only. They call read-only methods: the D-Bus interface the code depends on has no method that starts, stops or reloads units. Note: the godbus dependency links `os/exec` for session-bus autolaunch, a path this server never takes; Landlock grants no execute right anywhere, so it could not run a binary anyway.
@@ -79,7 +79,8 @@ The detailed reason is logged to stderr for the operator.
 Requires Go ≥ 1.26. If your local Go is older, the `toolchain` line in `go.mod` makes `go` download the right toolchain automatically.
 
 ```sh
-make build   # -> bin/linux-diag-mcp
+make build      # -> bin/linux-diag-mcp, bin/linux-diag-dashboard
+make dashboard  # build and start the live dashboard
 make test    # go test -race ./...
 make lint    # go vet + staticcheck/golangci-lint if installed
 ```
@@ -87,7 +88,7 @@ make lint    # go vet + staticcheck/golangci-lint if installed
 Install:
 
 ```sh
-sudo install -m 0755 bin/linux-diag-mcp /usr/local/bin/
+sudo install -m 0755 bin/linux-diag-mcp bin/linux-diag-dashboard /usr/local/bin/
 ```
 
 ## Connecting
@@ -162,6 +163,34 @@ The unit also leaves some options unset because they would break tools:
 | `ProcSubset=pid` | the tools that read `/proc/meminfo`, `/proc/stat` and `/proc/net` |
 | `PrivateNetwork=yes` | `network_interfaces` and `listening_ports` describe an empty namespace |
 
+## Live dashboard
+
+`linux-diag-dashboard` shows every tool's output as a web page that updates itself: headline figures with short trend lines, CPU per core, memory, filesystems, top processes, listening ports, network rates and failed units.
+
+```sh
+linux-diag-dashboard --require-sandbox
+```
+
+It prints one URL to stderr, such as `http://127.0.0.1:38621/#<token>`. Open it in a browser on the same machine. The page reads the token from the URL fragment, which browsers never send to the server, keeps it for that tab and removes it from the address bar. Stopping the program invalidates the token; the next start prints a new one.
+
+| Flag | Default | Range |
+|---|---|---|
+| `--port` | `0` (a free port) | 0 or 1024–65535 |
+| `--interval` | `5s` | 1s–60s |
+| `--require-sandbox` | `false` | — |
+| `--max-output-bytes` | `32768` | 1024–1048576 |
+| `--tool-timeout` | `5s` | 100ms–60s |
+| `--version` | — | — |
+
+How it stays inside the same boundary as the server:
+
+- **Same code path.** The MCP server runs in-process over in-memory transports, so every call goes through the guard (timeout, truncation, panic recovery). Tool arguments are constants; nothing the browser sends reaches a tool. No subprocess is started.
+- **Same sandbox.** The listener is bound first, then Landlock confines the whole process, HTTP handling included. New binds are denied; the socket bound before keeps accepting.
+- **Loopback only.** It listens on `127.0.0.1`, which is not configurable.
+- **Token for data.** `/api/snapshot` answers only `Authorization: Bearer <token>` (43 random characters, compared in constant time). The page and its assets hold no data.
+- **Browser hardening.** Requests with a `Host` other than `127.0.0.1:<port>` or `localhost:<port>` are refused (DNS rebinding). Only `GET` and `HEAD` are allowed. Every response sets a CSP with no inline script, `nosniff`, `no-referrer`, `DENY` framing and `no-store`.
+- **Bounded load.** One collection serves every open page for the refresh interval; requests that arrive while it runs wait for it and share its result. Hidden tabs stop polling. As with the server, a tool call stuck past `--tool-timeout` (for example `statfs` on a dead NFS mount) keeps a goroutine blocked; the dashboard repeats calls every interval while a page is open, so such goroutines can accumulate until the mount recovers.
+
 ## Threat model
 
 ### What is protected
@@ -192,13 +221,16 @@ Out of scope: an attacker who is already root, a compromised kernel, and the hol
 | Resource exhaustion | Per-call timeout that holds even when a tool ignores its context. Output cap. Bounded file reads (1 MiB). statfs runs in a worker, so a hung NFS mount can't block. systemd `TasksMax`, `MemoryMax`, `RuntimeMaxSec`. | `guard` and integration tests (timeout, panic, truncation) |
 | Crash through a panic (in our code or in the SDK) | Recover in the middleware and in every goroutine we start. | `guard`, `disk` and integration tests |
 | Data races | No shared mutable state between tools. | every test runs with `-race`, including concurrent calls |
+| Dashboard data read from another machine or a web page | Listens on `127.0.0.1` only. Bearer token required for data, never accepted in the URL. `Host` allow-list against DNS rebinding. CSP without inline script. | `dashboard` handler tests; sandbox test proving the pre-bound listener still serves |
 
 ### Residual risks
 
 - **The information is the product.** Process names, ports, mounts, interfaces and unit names describe the host to whoever can connect, so the access control is who can run the server: the SSH key or the socket group. With `/proc` mounted `hidepid=2`, an unprivileged server sees only its own processes. That is by design: don't run it as root.
 - **Printable text still reaches the model.** A 15-character process name like `ignore_previous` passes sanitizing. The client has to treat tool output as data.
 - **A call that times out keeps running in the background** until the code it is stuck in returns. The client gets its answer on time, but repeated calls stuck that way (for example statfs on a dead NFS mount) can pile up. v1 has no rate limit; under systemd, `TasksMax` and `MemoryMax` bound the damage.
+- **Landlock doesn't restrict Multipath TCP**, which Go uses by default for `net.Listen` since 1.24. Inside the sandbox a new MPTCP socket can still bind; the sandbox test logs this on every run. The server code never opens a socket, so this matters only if an attacker already runs code in the process. The systemd unit's `RestrictAddressFamilies=AF_UNIX` blocks it there.
 - **Landlock depends on the kernel.** ABI < 4 doesn't restrict TCP, and ABI < 9 doesn't restrict connecting to UNIX sockets by path (the unit's `RestrictAddressFamilies=AF_UNIX` still blocks IP). The sandbox test runs in CI (GitHub runner, ABI 8) and on the development kernel (ABI 4), and logs the ABI it ran on. Neither enforces the ABI ≥ 9 D-Bus rule yet, so that rule is still unproven. Without Landlock and without `--require-sandbox`, the server runs unsandboxed and logs a warning.
+- **The dashboard token is a bearer secret.** Anyone who sees the printed URL (terminal scrollback, a shared screen, another local user reading your terminal) can read the data until the program stops. Any local process can connect to the port, but without the token it gets only the empty page.
 - **The godbus dependency links `os/exec`** for session-bus autolaunch. This server never takes that code path, and Landlock would deny the execution anyway.
 
 ## License

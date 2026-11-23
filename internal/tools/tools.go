@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"os"
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -17,6 +18,7 @@ import (
 	"github.com/xilen0x/linux-diag-mcp/internal/collectors/meminfo"
 	"github.com/xilen0x/linux-diag-mcp/internal/collectors/netdev"
 	"github.com/xilen0x/linux-diag-mcp/internal/collectors/netsock"
+	"github.com/xilen0x/linux-diag-mcp/internal/collectors/procs"
 	"github.com/xilen0x/linux-diag-mcp/internal/collectors/sysinfo"
 	"github.com/xilen0x/linux-diag-mcp/internal/validate"
 )
@@ -35,7 +37,14 @@ type Deps struct {
 	CPUSampleInterval time.Duration
 	// Statfs queries mounted filesystems; defaults to disk.SysStatfs when nil.
 	Statfs disk.StatFunc
+	// PageSize converts statm pages to bytes; defaults to os.Getpagesize().
+	PageSize uint64
 }
+
+// clockTicks is USER_HZ, the unit of utime/stime in /proc/[pid]/stat. The
+// kernel fixes it at 100 for the userspace ABI on all mainstream
+// architectures, independently of CONFIG_HZ.
+const clockTicks = 100
 
 // NoInput is the argument type of tools without parameters. As a struct it
 // infers a schema with additionalProperties=false, so any argument is
@@ -51,6 +60,7 @@ func Register(s *mcp.Server, d Deps) {
 	AddDiskUsage(s, d)
 	AddNetworkInterfaces(s, d)
 	AddListeningPorts(s, d)
+	AddTopProcesses(s, d)
 }
 
 // readOnly returns fresh annotations per tool (no shared mutable pointers).
@@ -177,6 +187,63 @@ func AddListeningPorts(s *mcp.Server, d Deps) {
 			return nil, netsock.Ports{}, err
 		}
 		out, err := netsock.Collect(d.ProcFS, proto)
+		return nil, out, err
+	})
+}
+
+// TopProcessesInput is the argument of top_processes.
+type TopProcessesInput struct {
+	SortBy string `json:"sort_by" jsonschema:"ranking key: cpu or mem (resident memory)"`
+	Limit  *int   `json:"limit,omitempty" jsonschema:"number of processes to return"`
+}
+
+func topProcessesSchema() *jsonschema.Schema {
+	sch, err := jsonschema.For[TopProcessesInput](nil)
+	if err != nil {
+		panic(fmt.Sprintf("top_processes schema: %v", err)) // static type: programming error
+	}
+	sch.Properties["sort_by"].Enum = []any{string(validate.SortByCPU), string(validate.SortByMem)}
+	lo, hi := float64(validate.MinLimit), float64(validate.MaxLimit)
+	limit := sch.Properties["limit"]
+	limit.Minimum, limit.Maximum = &lo, &hi
+	// No schema "default": with it, go-sdk v1.8.0 / jsonschema-go v0.4.3
+	// apply defaults into a nil map when arguments are omitted and panic,
+	// killing the server (DoS). The default lives in validate.Limit.
+	limit.Description = fmt.Sprintf("number of processes to return (default %d)", validate.DefaultLimit)
+	return sch
+}
+
+// AddTopProcesses registers top_processes.
+func AddTopProcesses(s *mcp.Server, d Deps) {
+	interval := d.CPUSampleInterval
+	if interval <= 0 {
+		interval = DefaultCPUSampleInterval
+	}
+	pageSize := d.PageSize
+	if pageSize == 0 {
+		pageSize = 4096
+		if ps := os.Getpagesize(); ps > 0 {
+			pageSize = uint64(ps)
+		}
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "top_processes",
+		Description: "Top processes by CPU (sampled over a short window) or resident memory. " +
+			"Returns only pid, comm, state, cpu_percent and rss_bytes; never command lines or environment.",
+		Annotations: readOnly("Top processes"),
+		InputSchema: topProcessesSchema(),
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in TopProcessesInput) (*mcp.CallToolResult, procs.Result, error) {
+		sortBy, err := validate.ParseSortKey(in.SortBy)
+		if err != nil {
+			return nil, procs.Result{}, err
+		}
+		limit, err := validate.Limit(in.Limit)
+		if err != nil {
+			return nil, procs.Result{}, err
+		}
+		out, err := procs.Collect(ctx, d.ProcFS, procs.Options{
+			SortBy: sortBy, Limit: limit, Interval: interval, PageSize: pageSize, ClockTicks: clockTicks,
+		})
 		return nil, out, err
 	})
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/xilen0x/linux-diag-mcp/internal/collectors/meminfo"
 	"github.com/xilen0x/linux-diag-mcp/internal/collectors/netdev"
 	"github.com/xilen0x/linux-diag-mcp/internal/collectors/netsock"
+	"github.com/xilen0x/linux-diag-mcp/internal/collectors/procs"
 	"github.com/xilen0x/linux-diag-mcp/internal/collectors/sysinfo"
 	"github.com/xilen0x/linux-diag-mcp/internal/server"
 	"github.com/xilen0x/linux-diag-mcp/internal/tools"
@@ -33,6 +35,10 @@ func fixtureDeps() tools.Deps {
 			"meminfo": {Data: []byte("MemTotal: 1000 kB\nMemFree: 100 kB\nMemAvailable: 400 kB\n" +
 				"Buffers: 10 kB\nCached: 20 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n")},
 			"stat":    {Data: []byte(stat)},
+			"1/stat":  {Data: []byte("1 (init) S 0 1 1 0 -1 0 0 0 0 0 5 5 0 0 20 0 1 0 15 0 0\n")},
+			"1/statm": {Data: []byte("100 25 0 0 0 0 0\n")},
+			"2/stat":  {Data: []byte("2 (worker) R 0 1 1 0 -1 0 0 0 0 0 9 9 0 0 20 0 1 0 16 0 0\n")},
+			"2/statm": {Data: []byte("100 50 0 0 0 0 0\n")},
 			"mounts":  {Data: []byte("/dev/sda1 / ext4 rw 0 0\nproc /proc proc rw 0 0\n")},
 			"net/dev": {Data: []byte("h1\nh2\n    lo: 10 1 0 0 0 0 0 0 10 1 0 0 0 0 0 0\n")},
 			"net/tcp": {Data: []byte("hdr\n   0: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 1 1\n")},
@@ -43,6 +49,7 @@ func fixtureDeps() tools.Deps {
 		},
 		EtcFS:             fstest.MapFS{"os-release": {Data: []byte("ID=testos\nNAME=\"Test OS\"\n")}},
 		CPUSampleInterval: time.Millisecond,
+		PageSize:          4096,
 	}
 }
 
@@ -96,7 +103,7 @@ func TestToolsList(t *testing.T) {
 	}
 	sort.Strings(names)
 	want := []string{"cpu_usage", "disk_usage", "listening_ports", "load_average",
-		"memory_usage", "network_interfaces", "system_info"}
+		"memory_usage", "network_interfaces", "system_info", "top_processes"}
 	if len(names) != len(want) {
 		t.Fatalf("tools = %v, want %v", names, want)
 	}
@@ -206,14 +213,17 @@ func TestCollectorErrorIsToolError(t *testing.T) {
 func TestConcurrentCalls(t *testing.T) {
 	cs := connect(t)
 	names := []string{"system_info", "load_average", "memory_usage", "cpu_usage",
-		"disk_usage", "network_interfaces", "listening_ports"}
+		"disk_usage", "network_interfaces", "listening_ports", "top_processes"}
 	errs := make(chan error, 8*len(names))
 	for range 8 {
 		for _, name := range names {
 			go func() {
 				var args any
-				if name == "listening_ports" {
+				switch name {
+				case "listening_ports":
 					args = map[string]any{"protocol": "tcp"}
+				case "top_processes":
+					args = map[string]any{"sort_by": "cpu"}
 				}
 				res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: name, Arguments: args})
 				if err == nil && res.IsError {
@@ -309,4 +319,90 @@ func TestListeningPortsSchemaAdvertisesEnum(t *testing.T) {
 		return
 	}
 	t.Fatal("listening_ports not listed")
+}
+
+func TestCallTopProcesses(t *testing.T) {
+	cs := connect(t)
+	var mem procs.Result
+	call(t, cs, "top_processes", map[string]any{"sort_by": "mem", "limit": 1}, &mem)
+	if mem.SortBy != "mem" || mem.Limit != 1 || mem.TotalProcesses != 2 ||
+		len(mem.Processes) != 1 || mem.Processes[0].PID != 2 || mem.Processes[0].RSSBytes != 50*4096 {
+		t.Fatalf("mem: got %+v", mem)
+	}
+	var def procs.Result
+	call(t, cs, "top_processes", map[string]any{"sort_by": "cpu"}, &def)
+	if def.Limit != 10 || len(def.Processes) != 2 {
+		t.Fatalf("default limit: got %+v", def)
+	}
+}
+
+func TestTopProcessesRejectsBadArguments(t *testing.T) {
+	cs := connect(t)
+	for _, args := range []map[string]any{
+		nil,
+		{},
+		{"limit": 5},
+		{"sort_by": "CPU"},
+		{"sort_by": "rss"},
+		{"sort_by": "cpu; kill -9 1"},
+		{"sort_by": "cpu", "limit": 0},
+		{"sort_by": "cpu", "limit": 21},
+		{"sort_by": "cpu", "limit": -1},
+		{"sort_by": "cpu", "limit": 2.5},
+		{"sort_by": "cpu", "limit": "5"},
+		{"sort_by": "cpu", "limit": 1e300},
+		{"sort_by": "cpu", "pid": 1},
+	} {
+		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "top_processes", Arguments: args})
+		if err == nil && !res.IsError {
+			t.Errorf("args %v accepted", args)
+		}
+	}
+}
+
+func TestTopProcessesSchemaAdvertisesConstraints(t *testing.T) {
+	res, err := connect(t).ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range res.Tools {
+		if tool.Name != "top_processes" {
+			continue
+		}
+		raw, _ := json.Marshal(tool.InputSchema)
+		var s struct {
+			Required   []string `json:"required"`
+			Properties struct {
+				SortBy struct {
+					Enum []string `json:"enum"`
+				} `json:"sort_by"`
+				Limit struct {
+					Minimum     *float64 `json:"minimum"`
+					Maximum     *float64 `json:"maximum"`
+					Default     *int     `json:"default"`
+					Description string   `json:"description"`
+				} `json:"limit"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(raw, &s); err != nil {
+			t.Fatal(err)
+		}
+		p := s.Properties
+		if len(p.SortBy.Enum) != 2 || p.SortBy.Enum[0] != "cpu" || p.SortBy.Enum[1] != "mem" {
+			t.Errorf("sort_by enum = %v; schema %s", p.SortBy.Enum, raw)
+		}
+		if p.Limit.Minimum == nil || *p.Limit.Minimum != 1 || p.Limit.Maximum == nil || *p.Limit.Maximum != 20 {
+			t.Errorf("limit constraints wrong; schema %s", raw)
+		}
+		// A schema "default" makes the SDK panic on omitted arguments (DoS);
+		// the default is documented in the description instead.
+		if p.Limit.Default != nil || !strings.Contains(p.Limit.Description, "default 10") {
+			t.Errorf("limit must document its default without a schema default; schema %s", raw)
+		}
+		if len(s.Required) != 1 || s.Required[0] != "sort_by" {
+			t.Errorf("required = %v, want [sort_by]", s.Required)
+		}
+		return
+	}
+	t.Fatal("top_processes not listed")
 }

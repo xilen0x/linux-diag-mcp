@@ -35,11 +35,11 @@
   const tone = (v, warn, bad) => (v >= bad ? 'bad' : v >= warn ? 'warn' : 'ok');
   const fmtTime = (iso) => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
-  const history = { cpu: [], iowait: [], mem: [], load1: [] };
+  const trend = { cpu: [], iowait: [], mem: [], load1: [] };
   const push = (key, v) => {
     if (typeof v !== 'number') return;
-    history[key].push(v);
-    if (history[key].length > HISTORY) history[key].shift();
+    trend[key].push(v);
+    if (trend[key].length > HISTORY) trend[key].shift();
   };
   let prevNet = null; // { at: ms, byName: { name: {rx, tx} } } from the previous new snapshot
   let netRates = {};  // name -> { rx, tx } in KiB/s, computed once per new snapshot
@@ -172,7 +172,7 @@
       const tile = el('div', { className: `tile ${t.status === 'ok' ? '' : t.status}` },
         el('span', { className: 'label', textContent: t.label }), big,
         ...t.notes.filter(Boolean).map((n) => el('p', { className: 'note', textContent: n })));
-      if (t.spark) tile.append(sparkline(history[t.spark]));
+      if (t.spark) tile.append(sparkline(trend[t.spark]));
       return tile;
     }));
   }

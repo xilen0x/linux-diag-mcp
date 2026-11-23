@@ -1,5 +1,4 @@
-BINARY  := linux-diag-mcp
-PKG     := ./cmd/linux-diag-mcp
+BINARIES := linux-diag-mcp linux-diag-dashboard
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
@@ -7,10 +6,12 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 # PATH: analyzers like staticcheck must match the stdlib they parse.
 export GOTOOLCHAIN ?= $(shell sed -n 's/^toolchain //p' go.mod)
 
-.PHONY: build test lint run clean
+.PHONY: build test lint run dashboard clean
 
 build:
-	CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o bin/$(BINARY) $(PKG)
+	@for b in $(BINARIES); do \
+	  CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o bin/$$b ./cmd/$$b || exit 1; \
+	done
 
 test:
 	go test -race -count=1 ./...
@@ -24,7 +25,10 @@ lint:
 	 else echo "lint: golangci-lint not installed, skipping" >&2; fi
 
 run: build
-	./bin/$(BINARY)
+	./bin/linux-diag-mcp
+
+dashboard: build
+	./bin/linux-diag-dashboard --require-sandbox
 
 clean:
 	rm -rf bin

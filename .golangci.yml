@@ -4,6 +4,7 @@ linters:
   default: standard # errcheck, govet, ineffassign, staticcheck, unused
   enable:
     - bodyclose
+    - depguard
     - errorlint
     - gosec
     - misspell
@@ -11,11 +12,27 @@ linters:
     - revive
     - unconvert
   settings:
+    depguard:
+      rules:
+        no-exec:
+          files:
+            - "!$test"
+          deny:
+            - pkg: os/exec
+              desc: "v1 must not run external binaries (security requirement 2)"
     gosec:
       excludes: []
     nolintlint:
       require-explanation: true
       require-specific: true
+
+  exclusions:
+    rules:
+      # Tests deliberately read arbitrary paths, dial sockets and re-exec the
+      # test binary to prove the sandbox denies them.
+      - path: _test\.go
+        linters:
+          - gosec
 
 formatters:
   enable:

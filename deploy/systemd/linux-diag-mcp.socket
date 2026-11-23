@@ -1,0 +1,16 @@
+# One server process per connection (Accept=yes): the stdio protocol runs
+# over the accepted socket. Only members of the linux-diag-mcp group can
+# connect.
+[Unit]
+Description=linux-diag-mcp socket
+
+[Socket]
+ListenStream=/run/linux-diag-mcp.sock
+Accept=yes
+SocketUser=root
+SocketGroup=linux-diag-mcp
+SocketMode=0660
+MaxConnections=4
+
+[Install]
+WantedBy=sockets.target

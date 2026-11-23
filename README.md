@@ -1,7 +1,5 @@
 # linux-diag-mcp
 
-> **Status: work in progress (phase 7 of 8).** Implemented tools: `system_info`, `load_average`, `memory_usage`, `cpu_usage`, `disk_usage`, `network_interfaces`, `listening_ports`, `top_processes`, `failed_units`, `service_status`.
-
 A **read-only** [Model Context Protocol](https://modelcontextprotocol.io) server, written in Go, for diagnosing Linux systems. Security is the primary design requirement.
 
 ## Design principles
@@ -11,6 +9,7 @@ A **read-only** [Model Context Protocol](https://modelcontextprotocol.io) server
 - **Sandboxed**: before any tool is registered, Landlock restricts the process to read-only access to `/proc`, `/sys` and `/etc/os-release`.
 - **Minimal process data**: for each process it reports only pid, comm, state, cpu% and rss. It never reads `cmdline` or `environ`.
 - **Bounded output**: tools return structured JSON, truncated to a configurable size, with a timeout on every tool call.
+- **Errors never reflect input**: invalid arguments get a constant message, so a client can't make the server repeat text it chose.
 - **stdout is for the protocol only**: every log line goes to stderr.
 
 ## Tools (v1)
@@ -58,9 +57,22 @@ If the kernel has no Landlock support, the server logs a warning to stderr and k
 
 Out-of-range values and positional arguments are rejected, never clamped.
 
-## Threat model
+## Output
 
-_TODO (phase 8)._
+Every result is a JSON object matching the tool's published output schema (`structuredContent`, mirrored as JSON text in `content`). Strings that come from the system (process names, unit descriptions, mount points) are stripped of control and format characters and capped at 128 runes.
+
+If a result exceeds `--max-output-bytes`, the longest arrays are shortened, keeping their first elements, until it fits, so the result still matches the schema. `_meta` then carries `"linux-diag-mcp/truncated": true` and `"linux-diag-mcp/original_bytes"`. A result that can't be shortened becomes the error `result too large`.
+
+Errors are tool results with `isError: true`:
+
+| Cause | Message |
+|---|---|
+| Arguments don't match the schema (unknown key, value outside the enum, range or regex) | `invalid arguments: they do not match the tool's input schema` |
+| Call exceeded `--tool-timeout` | `tool timed out after 5s` |
+| Panic in a tool | `internal error` (the stack trace goes to stderr) |
+| Unknown tool name | JSON-RPC error `-32602`, `unknown tool or malformed request` |
+
+The detailed reason is logged to stderr for the operator.
 
 ## Build
 
@@ -72,6 +84,119 @@ make test    # go test -race ./...
 make lint    # go vet + staticcheck/golangci-lint if installed
 ```
 
+Install:
+
+```sh
+sudo install -m 0755 bin/linux-diag-mcp /usr/local/bin/
+```
+
 ## Connecting
 
-_TODO (phase 8): Claude Code / Claude Desktop, remote over SSH with a forced command, systemd unit running as a dedicated unprivileged user._
+Always pass `--require-sandbox` in production: then a missing or blocked Landlock is a startup failure, not a warning.
+
+### Local: Claude Code
+
+```sh
+claude mcp add linux-diag -- /usr/local/bin/linux-diag-mcp --require-sandbox
+```
+
+### Local: Claude Desktop
+
+In `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "linux-diag": {
+      "command": "/usr/local/bin/linux-diag-mcp",
+      "args": ["--require-sandbox"]
+    }
+  }
+}
+```
+
+### Remote: SSH forced command
+
+On the server, create a dedicated account and pin its key to the server binary. A forced command runs instead of whatever the client asks for, and the options deny a terminal and every kind of forwarding:
+
+```sh
+sudo useradd --create-home --shell /bin/sh diag-mcp
+```
+
+`/home/diag-mcp/.ssh/authorized_keys` (one line):
+
+```
+command="/usr/local/bin/linux-diag-mcp --require-sandbox",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding ssh-ed25519 AAAA... claude-diag
+```
+
+On the client, MCP's stdio runs over the SSH channel:
+
+```sh
+claude mcp add linux-diag-remote -- ssh -T -i ~/.ssh/claude_diag diag-mcp@server.example
+```
+
+Use a key made only for this purpose. Anyone holding it gets exactly the ten read-only tools.
+
+### systemd: dedicated unprivileged user
+
+[`deploy/systemd`](deploy/systemd) has a socket-activated unit: each connection to `/run/linux-diag-mcp.sock` starts one server process as the `linux-diag-mcp` system user, with no capabilities, IP sockets disabled, a seccomp filter and a read-only view of the filesystem. Only members of the `linux-diag-mcp` group can connect.
+
+```sh
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin linux-diag-mcp
+sudo install -m 0644 deploy/systemd/linux-diag-mcp.socket deploy/systemd/linux-diag-mcp@.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now linux-diag-mcp.socket
+sudo usermod -aG linux-diag-mcp "$USER"   # then log in again
+claude mcp add linux-diag -- socat STDIO UNIX-CONNECT:/run/linux-diag-mcp.sock
+```
+
+To serve remote clients through the hardened unit instead of running the binary as the SSH user, add `diag-mcp` to the `linux-diag-mcp` group and use `command="socat STDIO UNIX-CONNECT:/run/linux-diag-mcp.sock"` as the forced command.
+
+`@system-service` doesn't include the Landlock syscalls on systemd ≤ 255. A seccomp filter that blocks them makes Landlock look unsupported, so without `--require-sandbox` the server would run unsandboxed. The unit allows the three syscalls explicitly.
+
+The unit also leaves some options unset because they would break tools:
+
+| Option | Tool it would break |
+|---|---|
+| `ProtectProc=invisible` | `top_processes`: other users' processes disappear |
+| `ProcSubset=pid` | the tools that read `/proc/meminfo`, `/proc/stat` and `/proc/net` |
+| `PrivateNetwork=yes` | `network_interfaces` and `listening_ports` describe an empty namespace |
+
+## Threat model
+
+### What is protected
+
+- Confidentiality of the host: file contents, secrets in other processes' `cmdline`/`environ`, other users' data.
+- Integrity and availability of the host: the server must not be able to change anything.
+- The model on the other side: the server must not become a channel for instructions.
+
+### Adversaries
+
+1. **The MCP client itself**, for example a model steered by prompt injection from content it read elsewhere. It can call any tool with any arguments, as often as it likes.
+2. **Unprivileged local users** who control data the server reports: process names (`prctl(PR_SET_NAME)`), FUSE mount points, listening ports. They can try to plant instructions in tool output (indirect prompt injection).
+3. **Network attackers**: there is no network listener. Remote access goes through SSH, which handles authentication.
+
+Out of scope: an attacker who is already root, a compromised kernel, and the holder of an authorized SSH key. That key holder gets the tool surface by design.
+
+### Threats and controls
+
+| Threat | Control | Verified by |
+|---|---|---|
+| Read arbitrary files, path traversal | No tool takes a path. Landlock allows reading only `/proc`, `/sys` and `/etc/os-release`, checking the resolved path, so `/proc/self/root/...` is denied too. | `validate` tests, sandbox test re-executing the test binary under Landlock |
+| Command injection | No `os/exec` in our code (depguard). systemd is reached over D-Bus. Landlock grants no execute right. | golangci-lint, sandbox test |
+| Secret disclosure through processes | Only `stat`/`statm` are opened. `cmdline` and `environ` are never read. | `procs` test asserting the exact set of opened files, with decoy secrets in the fixtures |
+| Changing the system | Read-only D-Bus methods behind a narrow interface. Landlock denies every write. The systemd unit uses `ProtectSystem=strict` and drops all capabilities. | sandbox test (`create`, `write /proc/self/comm` denied) |
+| Unsafe D-Bus address from the environment (`autolaunch:` would exec, `tcp:` would use the network) | Fixed socket path, `EXTERNAL` authentication only. | real call with `DBUS_SYSTEM_BUS_ADDRESS=tcp:...` set |
+| Reflecting client input as instructions | Constant error messages. The unknown tool name is not echoed. | integration test sending hostile payloads to every tool |
+| Indirect injection through system data | Structured JSON only. Strings are stripped of control characters and capped at 128 runes. | `procio`, `systemd` tests (ANSI escapes removed) |
+| Resource exhaustion | Per-call timeout that holds even when a tool ignores its context. Output cap. Bounded file reads (1 MiB). statfs runs in a worker, so a hung NFS mount can't block. systemd `TasksMax`, `MemoryMax`, `RuntimeMaxSec`. | `guard` and integration tests (timeout, panic, truncation) |
+| Crash through a panic (in our code or in the SDK) | Recover in the middleware and in every goroutine we start. | `guard`, `disk` and integration tests |
+| Data races | No shared mutable state between tools. | every test runs with `-race`, including concurrent calls |
+
+### Residual risks
+
+- **The information is the product.** Process names, ports, mounts, interfaces and unit names describe the host to whoever can connect, so the access control is who can run the server: the SSH key or the socket group. With `/proc` mounted `hidepid=2`, an unprivileged server sees only its own processes. That is by design: don't run it as root.
+- **Printable text still reaches the model.** A 15-character process name like `ignore_previous` passes sanitizing. The client has to treat tool output as data.
+- **A call that times out keeps running in the background** until the code it is stuck in returns. The client gets its answer on time, but repeated calls stuck that way (for example statfs on a dead NFS mount) can pile up. v1 has no rate limit; under systemd, `TasksMax` and `MemoryMax` bound the damage.
+- **Landlock depends on the kernel.** ABI < 4 doesn't restrict TCP, and ABI < 9 doesn't restrict connecting to UNIX sockets by path (the unit's `RestrictAddressFamilies=AF_UNIX` still blocks IP). The ABI ≥ 9 D-Bus rule hasn't been run on the development kernel (ABI 4). Without Landlock and without `--require-sandbox`, the server runs unsandboxed and logs a warning.
+- **The godbus dependency links `os/exec`** for session-bus autolaunch. This server never takes that code path, and Landlock would deny the execution anyway.

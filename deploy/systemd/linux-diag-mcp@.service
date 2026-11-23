@@ -1,0 +1,56 @@
+[Unit]
+Description=linux-diag-mcp (read-only Linux diagnostics MCP server)
+Documentation=https://github.com/xilen0x/linux-diag-mcp
+
+[Service]
+ExecStart=/usr/local/bin/linux-diag-mcp --require-sandbox
+User=linux-diag-mcp
+Group=linux-diag-mcp
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+
+# Privileges
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=yes
+
+# Filesystem (Landlock narrows this further from inside the process)
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+UMask=0077
+# Not set on purpose: ProtectProc=invisible would hide other users'
+# processes from top_processes, and ProcSubset=pid would hide
+# /proc/meminfo, /proc/stat and /proc/net. PrivateNetwork=yes would make
+# network_interfaces and listening_ports describe an empty namespace.
+
+# Network: only UNIX sockets (systemd's D-Bus), no IP at all
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+
+# Kernel and process surface
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+# @system-service lacks the Landlock syscalls (systemd <= 255): without
+# this line the sandbox is silently unavailable. --require-sandbox above
+# turns that into a startup failure instead of an unsandboxed server.
+SystemCallFilter=landlock_create_ruleset landlock_add_rule landlock_restrict_self
+SystemCallErrorNumber=EPERM
+
+# Resources
+TasksMax=32
+MemoryMax=128M
+RuntimeMaxSec=1h

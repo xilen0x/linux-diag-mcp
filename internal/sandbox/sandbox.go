@@ -1,8 +1,8 @@
 // Package sandbox confines the process with Landlock before any tool runs.
 //
-// Policy: read-only access to /proc, /sys and /etc/os-release; no writes,
-// no execution, no TCP/UDP bind or connect (ABI >= 4/10), and IPC scoping
-// (ABI >= 6). Landlock cannot be lifted once applied and covers every
+// Policy: read-only access to /proc, /sys and /etc/os-release; connect(2)
+// only to the D-Bus system bus socket (ABI >= 9); no writes, no execution,
+// no TCP/UDP bind or connect (ABI >= 4/10), and IPC scoping (ABI >= 6). Landlock cannot be lifted once applied and covers every
 // thread of the process.
 package sandbox
 
@@ -12,6 +12,8 @@ import (
 
 	"github.com/landlock-lsm/go-landlock/landlock"
 	ll "github.com/landlock-lsm/go-landlock/landlock/syscall"
+
+	"github.com/xilen0x/linux-diag-mcp/internal/collectors/systemd"
 )
 
 // ErrUnavailable is returned when Landlock is required but the kernel does
@@ -66,6 +68,7 @@ func apply(opts Options, probe func() (int, error), enforce func() error) (Statu
 const (
 	readOnlyDir  = landlock.AccessFSSet(ll.AccessFSReadFile | ll.AccessFSReadDir)
 	readOnlyFile = landlock.AccessFSSet(ll.AccessFSReadFile)
+	resolveUnix  = landlock.AccessFSSet(ll.AccessFSResolveUnix)
 )
 
 // restrict applies the policy with the highest ABI the kernel supports.
@@ -77,5 +80,9 @@ func restrict() error {
 		// Usually a symlink to /usr/lib/os-release: the rule binds to the
 		// target inode. Minimal containers may not ship it.
 		landlock.PathAccess(readOnlyFile, "/etc/os-release").IgnoreIfMissing(),
+		// connect(2) to the D-Bus system bus, for the systemd tools. Only
+		// enforced (and only needed) from ABI v9; older ABIs do not
+		// restrict pathname UNIX sockets at all.
+		landlock.PathAccess(resolveUnix, systemd.SystemBusSocket).IgnoreIfMissing(),
 	)
 }

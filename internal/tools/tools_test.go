@@ -11,6 +11,7 @@ import (
 	"testing/fstest"
 	"time"
 
+	sd "github.com/coreos/go-systemd/v22/dbus"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/xilen0x/linux-diag-mcp/internal/collectors/cpustat"
@@ -21,6 +22,7 @@ import (
 	"github.com/xilen0x/linux-diag-mcp/internal/collectors/netsock"
 	"github.com/xilen0x/linux-diag-mcp/internal/collectors/procs"
 	"github.com/xilen0x/linux-diag-mcp/internal/collectors/sysinfo"
+	"github.com/xilen0x/linux-diag-mcp/internal/collectors/systemd"
 	"github.com/xilen0x/linux-diag-mcp/internal/server"
 	"github.com/xilen0x/linux-diag-mcp/internal/tools"
 )
@@ -50,6 +52,7 @@ func fixtureDeps() tools.Deps {
 		EtcFS:             fstest.MapFS{"os-release": {Data: []byte("ID=testos\nNAME=\"Test OS\"\n")}},
 		CPUSampleInterval: time.Millisecond,
 		PageSize:          4096,
+		Systemd:           fakeSystemd,
 	}
 }
 
@@ -102,8 +105,8 @@ func TestToolsList(t *testing.T) {
 		}
 	}
 	sort.Strings(names)
-	want := []string{"cpu_usage", "disk_usage", "listening_ports", "load_average",
-		"memory_usage", "network_interfaces", "system_info", "top_processes"}
+	want := []string{"cpu_usage", "disk_usage", "failed_units", "listening_ports", "load_average",
+		"memory_usage", "network_interfaces", "service_status", "system_info", "top_processes"}
 	if len(names) != len(want) {
 		t.Fatalf("tools = %v, want %v", names, want)
 	}
@@ -172,7 +175,7 @@ func TestCallCPUUsage(t *testing.T) {
 func TestCallRejectsUnknownArguments(t *testing.T) {
 	cs := connect(t)
 	for _, name := range []string{"system_info", "load_average", "memory_usage", "cpu_usage",
-		"disk_usage", "network_interfaces"} {
+		"disk_usage", "network_interfaces", "failed_units"} {
 		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
 			Name:      name,
 			Arguments: map[string]any{"path": "/etc/passwd"},
@@ -213,7 +216,8 @@ func TestCollectorErrorIsToolError(t *testing.T) {
 func TestConcurrentCalls(t *testing.T) {
 	cs := connect(t)
 	names := []string{"system_info", "load_average", "memory_usage", "cpu_usage",
-		"disk_usage", "network_interfaces", "listening_ports", "top_processes"}
+		"disk_usage", "network_interfaces", "listening_ports", "top_processes",
+		"failed_units", "service_status"}
 	errs := make(chan error, 8*len(names))
 	for range 8 {
 		for _, name := range names {
@@ -224,6 +228,8 @@ func TestConcurrentCalls(t *testing.T) {
 					args = map[string]any{"protocol": "tcp"}
 				case "top_processes":
 					args = map[string]any{"sort_by": "cpu"}
+				case "service_status":
+					args = map[string]any{"unit": "nginx.service"}
 				}
 				res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: name, Arguments: args})
 				if err == nil && res.IsError {
@@ -405,4 +411,112 @@ func TestTopProcessesSchemaAdvertisesConstraints(t *testing.T) {
 		return
 	}
 	t.Fatal("top_processes not listed")
+}
+
+// busFake is a minimal read-only systemd bus for protocol tests; the
+// collector's conversion logic is tested in its own package.
+type busFake struct{}
+
+func (busFake) ListUnitsFilteredContext(context.Context, []string) ([]sd.UnitStatus, error) {
+	return []sd.UnitStatus{{Name: "backup.service", Description: "Backup", LoadState: "loaded",
+		ActiveState: "failed", SubState: "failed"}}, nil
+}
+
+func (busFake) ListUnitsByNamesContext(_ context.Context, names []string) ([]sd.UnitStatus, error) {
+	if names[0] == "nginx.service" {
+		return []sd.UnitStatus{{Name: "nginx.service", LoadState: "loaded", ActiveState: "active", SubState: "running"}}, nil
+	}
+	return []sd.UnitStatus{{Name: names[0], LoadState: "not-found", ActiveState: "inactive", SubState: "dead"}}, nil
+}
+
+func (busFake) GetUnitPropertyContext(context.Context, string, string) (*sd.Property, error) {
+	return nil, fmt.Errorf("not available")
+}
+
+func (busFake) GetUnitTypePropertiesContext(context.Context, string, string) (map[string]any, error) {
+	return map[string]any{"MainPID": uint32(42)}, nil
+}
+
+func (busFake) Close() {}
+
+func fakeSystemd(context.Context) (systemd.Conn, error) { return busFake{}, nil }
+
+func TestCallFailedUnits(t *testing.T) {
+	var got systemd.Failed
+	call(t, connect(t), "failed_units", nil, &got)
+	if len(got.Units) != 1 || got.Units[0].Name != "backup.service" || got.Units[0].ActiveState != "failed" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestCallServiceStatus(t *testing.T) {
+	cs := connect(t)
+	var got systemd.Service
+	call(t, cs, "service_status", map[string]any{"unit": "nginx.service"}, &got)
+	if got.Name != "nginx.service" || got.ActiveState != "active" || got.MainPID != 42 {
+		t.Fatalf("got %+v", got)
+	}
+	var ghost systemd.Service
+	call(t, cs, "service_status", map[string]any{"unit": "ghost.service"}, &ghost)
+	if ghost.LoadState != "not-found" {
+		t.Fatalf("ghost: got %+v", ghost)
+	}
+}
+
+func TestServiceStatusRejectsBadUnit(t *testing.T) {
+	cs := connect(t)
+	for _, args := range []map[string]any{
+		nil,
+		{},
+		{"unit": ""},
+		{"unit": "nginx"},
+		{"unit": "nginx.socket"},
+		{"unit": "../../etc/passwd"},
+		{"unit": "/etc/passwd.service"},
+		{"unit": "nginx.service; reboot"},
+		{"unit": "nginx.service\n"},
+		{"unit": "ｎｇｉｎｘ.service"},
+		{"unit": strings.Repeat("a", 129) + ".service"},
+		{"unit": 42},
+		{"unit": "nginx.service", "action": "restart"},
+	} {
+		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "service_status", Arguments: args})
+		if err == nil && !res.IsError {
+			t.Errorf("args %v accepted", args)
+		}
+	}
+}
+
+func TestServiceStatusSchemaAdvertisesPattern(t *testing.T) {
+	res, err := connect(t).ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range res.Tools {
+		if tool.Name != "service_status" {
+			continue
+		}
+		raw, _ := json.Marshal(tool.InputSchema)
+		var s struct {
+			Required   []string `json:"required"`
+			Properties struct {
+				Unit struct {
+					Pattern   string `json:"pattern"`
+					MaxLength *int   `json:"maxLength"`
+				} `json:"unit"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(raw, &s); err != nil {
+			t.Fatal(err)
+		}
+		u := s.Properties.Unit
+		if u.Pattern != `^[a-zA-Z0-9@._-]{1,128}\.service$` || u.MaxLength == nil || *u.MaxLength != 136 {
+			t.Errorf("unit constraints wrong; schema %s", raw)
+		}
+		if len(s.Required) != 1 || s.Required[0] != "unit" {
+			t.Errorf("required = %v", s.Required)
+		}
+		return
+	}
+	t.Fatal("service_status not listed")
 }

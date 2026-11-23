@@ -86,15 +86,17 @@ func Limit(v *int) (int, error) {
 	return *v, nil
 }
 
-const (
-	unitSuffix     = ".service"
-	maxUnitStemLen = 128
-)
+// UnitNamePattern is the accepted service name, from the spec. It is also
+// published in the tool's input schema.
+const UnitNamePattern = `^[a-zA-Z0-9@._-]{1,128}\.service$`
+
+// MaxUnitNameLen is the longest name UnitNamePattern can match.
+const MaxUnitNameLen = 128 + len(".service")
 
 // unitNameRe is the contract from the spec. Go's RE2 engine runs in linear
 // time (no ReDoS), and without the (?m) flag "$" matches only at the very
 // end of the text, so a trailing "\n" cannot slip through.
-var unitNameRe = regexp.MustCompile(`^[a-zA-Z0-9@._-]{1,128}\.service$`)
+var unitNameRe = regexp.MustCompile(UnitNamePattern)
 
 // UnitName is a validated systemd service name. The zero value is invalid;
 // the only way to obtain a valid one is ParseUnitName, so collectors that
@@ -105,11 +107,8 @@ type UnitName struct{ name string }
 // ^[a-zA-Z0-9@._-]{1,128}\.service$.
 func ParseUnitName(s string) (UnitName, error) {
 	// Cheap length gate before the regex for oversized payloads.
-	if len(s) > maxUnitStemLen+len(unitSuffix) || !unitNameRe.MatchString(s) {
-		return UnitName{}, &Error{
-			Field:  "unit",
-			Reason: `must match ^[a-zA-Z0-9@._-]{1,128}\.service$`,
-		}
+	if len(s) > MaxUnitNameLen || !unitNameRe.MatchString(s) {
+		return UnitName{}, &Error{Field: "unit", Reason: "must match " + UnitNamePattern}
 	}
 	return UnitName{name: s}, nil
 }

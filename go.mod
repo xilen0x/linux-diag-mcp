@@ -5,6 +5,8 @@ go 1.26.0
 toolchain go1.26.11
 
 require (
+	github.com/coreos/go-systemd/v22 v22.7.0
+	github.com/godbus/dbus/v5 v5.1.0
 	github.com/google/jsonschema-go v0.4.3
 	github.com/landlock-lsm/go-landlock v0.11.2
 	github.com/modelcontextprotocol/go-sdk v1.8.0

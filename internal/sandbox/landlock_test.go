@@ -2,6 +2,7 @@ package sandbox_test
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -11,9 +12,11 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	ll "github.com/landlock-lsm/go-landlock/landlock/syscall"
 
+	"github.com/xilen0x/linux-diag-mcp/internal/collectors/systemd"
 	"github.com/xilen0x/linux-diag-mcp/internal/sandbox"
 )
 
@@ -65,6 +68,12 @@ func sandboxedChild() int {
 		}},
 		{"write /proc/self/comm", func() error {
 			return os.WriteFile("/proc/self/comm", []byte("pwned"), 0)
+		}},
+		{"dbus failed units", func() error {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, err := systemd.FailedUnits(ctx, systemd.DialSystemBus)
+			return err
 		}},
 		{"tcp connect", func() error {
 			c, err := net.Dial("tcp4", os.Getenv(envTCPAddr))
@@ -147,6 +156,11 @@ func TestSandboxRestrictsFilesystemAndNetwork(t *testing.T) {
 		"readdir /home":                   denied,
 		"readdir /":                       denied,
 		"create file in tempdir":          denied,
+	}
+	// The D-Bus socket is the one connect(2) target the sandbox allows
+	// (explicitly needed from Landlock ABI v9 on).
+	if _, err := os.Stat(systemd.SystemBusSocket); err == nil {
+		want["dbus failed units"] = "ok"
 	}
 	if abi >= 4 { // TCP restrictions need Landlock ABI v4
 		want["tcp connect"] = denied

@@ -1,6 +1,6 @@
 # linux-diag-mcp
 
-> **Status: work in progress (phase 6 of 8).** Implemented tools: `system_info`, `load_average`, `memory_usage`, `cpu_usage`, `disk_usage`, `network_interfaces`, `listening_ports`, `top_processes`.
+> **Status: work in progress (phase 7 of 8).** Implemented tools: `system_info`, `load_average`, `memory_usage`, `cpu_usage`, `disk_usage`, `network_interfaces`, `listening_ports`, `top_processes`, `failed_units`, `service_status`.
 
 A **read-only** [Model Context Protocol](https://modelcontextprotocol.io) server, written in Go, for diagnosing Linux systems. Security is the primary design requirement.
 
@@ -36,9 +36,12 @@ At startup, before any tool is registered, the process confines itself with [Lan
 |---|---|
 | read files and list dirs under `/proc`, `/sys` | everything else on the filesystem (e.g. `/etc/passwd`, `/home`) |
 | read `/etc/os-release` | any write, create, delete or truncate, everywhere |
+| `connect(2)` to `/run/dbus/system_bus_socket` (ABI ≥ 9; older ABIs don't restrict UNIX sockets) | any other pathname UNIX socket (ABI ≥ 9) |
 | | executing files |
 | | TCP bind/connect (Landlock ABI ≥ 4), UDP (ABI ≥ 10) |
 | | abstract UNIX sockets and signals outside the sandbox (ABI ≥ 6) |
+
+The systemd tools always dial the system bus at that fixed path, ignoring `DBUS_SYSTEM_BUS_ADDRESS` (where `autolaunch:` would run `dbus-launch` and `tcp:` would open the network), and authenticate with `EXTERNAL` only. They call read-only methods: the D-Bus interface the code depends on has no method that starts, stops or reloads units. Note: the godbus dependency links `os/exec` for session-bus autolaunch, a path this server never takes; Landlock grants no execute right anywhere, so it could not run a binary anyway.
 
 Landlock checks the resolved path, so magic links such as `/proc/self/root/etc/passwd` are denied too. The restriction applies to every thread and can't be lifted.
 

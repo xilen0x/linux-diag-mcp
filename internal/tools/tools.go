@@ -20,6 +20,7 @@ import (
 	"github.com/xilen0x/linux-diag-mcp/internal/collectors/netsock"
 	"github.com/xilen0x/linux-diag-mcp/internal/collectors/procs"
 	"github.com/xilen0x/linux-diag-mcp/internal/collectors/sysinfo"
+	"github.com/xilen0x/linux-diag-mcp/internal/collectors/systemd"
 	"github.com/xilen0x/linux-diag-mcp/internal/validate"
 )
 
@@ -39,6 +40,8 @@ type Deps struct {
 	Statfs disk.StatFunc
 	// PageSize converts statm pages to bytes; defaults to os.Getpagesize().
 	PageSize uint64
+	// Systemd opens a D-Bus connection; defaults to systemd.DialSystemBus.
+	Systemd systemd.Dialer
 }
 
 // clockTicks is USER_HZ, the unit of utime/stime in /proc/[pid]/stat. The
@@ -61,6 +64,8 @@ func Register(s *mcp.Server, d Deps) {
 	AddNetworkInterfaces(s, d)
 	AddListeningPorts(s, d)
 	AddTopProcesses(s, d)
+	AddFailedUnits(s, d)
+	AddServiceStatus(s, d)
 }
 
 // readOnly returns fresh annotations per tool (no shared mutable pointers).
@@ -244,6 +249,61 @@ func AddTopProcesses(s *mcp.Server, d Deps) {
 		out, err := procs.Collect(ctx, d.ProcFS, procs.Options{
 			SortBy: sortBy, Limit: limit, Interval: interval, PageSize: pageSize, ClockTicks: clockTicks,
 		})
+		return nil, out, err
+	})
+}
+
+func systemdDialer(d Deps) systemd.Dialer {
+	if d.Systemd != nil {
+		return d.Systemd
+	}
+	return systemd.DialSystemBus
+}
+
+// AddFailedUnits registers failed_units.
+func AddFailedUnits(s *mcp.Server, d Deps) {
+	dial := systemdDialer(d)
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "failed_units",
+		Description: "systemd units currently in the failed state (any unit type), via D-Bus.",
+		Annotations: readOnly("Failed units"),
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ NoInput) (*mcp.CallToolResult, systemd.Failed, error) {
+		out, err := systemd.FailedUnits(ctx, dial)
+		return nil, out, err
+	})
+}
+
+// ServiceStatusInput is the argument of service_status.
+type ServiceStatusInput struct {
+	Unit string `json:"unit" jsonschema:"exact systemd service name, e.g. nginx.service"`
+}
+
+func serviceStatusSchema() *jsonschema.Schema {
+	sch, err := jsonschema.For[ServiceStatusInput](nil)
+	if err != nil {
+		panic(fmt.Sprintf("service_status schema: %v", err)) // static type: programming error
+	}
+	maxLen := validate.MaxUnitNameLen
+	sch.Properties["unit"].Pattern = validate.UnitNamePattern
+	sch.Properties["unit"].MaxLength = &maxLen
+	return sch
+}
+
+// AddServiceStatus registers service_status.
+func AddServiceStatus(s *mcp.Server, d Deps) {
+	dial := systemdDialer(d)
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "service_status",
+		Description: "State of one systemd service via D-Bus: load/active/sub state, unit file state, " +
+			"main PID, restart count, last result and since when it is active. Unknown names return load_state not-found.",
+		Annotations: readOnly("Service status"),
+		InputSchema: serviceStatusSchema(),
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ServiceStatusInput) (*mcp.CallToolResult, systemd.Service, error) {
+		unit, err := validate.ParseUnitName(in.Unit)
+		if err != nil {
+			return nil, systemd.Service{}, err
+		}
+		out, err := systemd.ServiceStatus(ctx, dial, unit)
 		return nil, out, err
 	})
 }

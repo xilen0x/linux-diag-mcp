@@ -200,3 +200,9 @@ Out of scope: an attacker who is already root, a compromised kernel, and the hol
 - **A call that times out keeps running in the background** until the code it is stuck in returns. The client gets its answer on time, but repeated calls stuck that way (for example statfs on a dead NFS mount) can pile up. v1 has no rate limit; under systemd, `TasksMax` and `MemoryMax` bound the damage.
 - **Landlock depends on the kernel.** ABI < 4 doesn't restrict TCP, and ABI < 9 doesn't restrict connecting to UNIX sockets by path (the unit's `RestrictAddressFamilies=AF_UNIX` still blocks IP). The sandbox test runs in CI (GitHub runner, ABI 8) and on the development kernel (ABI 4), and logs the ABI it ran on. Neither enforces the ABI ≥ 9 D-Bus rule yet, so that rule is still unproven. Without Landlock and without `--require-sandbox`, the server runs unsandboxed and logs a warning.
 - **The godbus dependency links `os/exec`** for session-bus autolaunch. This server never takes that code path, and Landlock would deny the execution anyway.
+
+## License
+
+Copyright 2026 Carlos Astorga. Licensed under the [Apache License, Version 2.0](LICENSE).
+
+Security issues: see [SECURITY.md](SECURITY.md) for private reporting.

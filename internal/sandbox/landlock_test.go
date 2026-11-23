@@ -29,8 +29,11 @@ const (
 // TestMain turns the test binary into the sandboxed child when re-executed.
 // Landlock cannot be undone, so it must never be applied to the parent.
 func TestMain(m *testing.M) {
-	if os.Getenv(envChild) == "1" {
+	switch os.Getenv(envChild) {
+	case "1":
 		os.Exit(sandboxedChild())
+	case childListener:
+		os.Exit(listenerChild())
 	}
 	os.Exit(m.Run())
 }

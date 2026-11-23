@@ -159,9 +159,14 @@ func TestSandboxRestrictsFilesystemAndNetwork(t *testing.T) {
 	}
 	// The D-Bus socket is the one connect(2) target the sandbox allows
 	// (explicitly needed from Landlock ABI v9 on).
-	if _, err := os.Stat(systemd.SystemBusSocket); err == nil {
+	_, busErr := os.Stat(systemd.SystemBusSocket)
+	if busErr == nil {
 		want["dbus failed units"] = "ok"
 	}
+	// Record what this kernel actually exercised: the ResolveUnix rule is
+	// only enforced (and so only proven) from ABI 9 with the bus present.
+	t.Logf("landlock ABI %d; dbus probe checked: %t; unix-socket rule enforced: %t",
+		abi, busErr == nil, abi >= 9 && busErr == nil)
 	if abi >= 4 { // TCP restrictions need Landlock ABI v4
 		want["tcp connect"] = denied
 	}

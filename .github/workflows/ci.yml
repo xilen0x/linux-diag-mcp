@@ -29,3 +29,6 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test -race -count=1 ./...
+      # Verbose run of the sandbox test only: shows the runner's Landlock
+      # ABI and whether the test ran or was skipped.
+      - run: go test -race -count=1 -v -run TestSandbox ./internal/sandbox/

@@ -167,6 +167,10 @@ The unit also leaves some options unset because they would break tools:
 
 `linux-diag-dashboard` shows every tool's output as a web page that updates itself: headline figures with short trend lines, CPU per core, memory, filesystems, top processes, listening ports, network rates and failed units.
 
+![linux-diag-dashboard updating live: headline figures with trend lines, CPU per core, memory, filesystems, processes, ports and failed units](docs/dashboard.gif)
+
+<sub>Recorded with synthetic data, not a real host.</sub>
+
 ```sh
 linux-diag-dashboard --require-sandbox
 ```

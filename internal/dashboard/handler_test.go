@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -92,6 +93,9 @@ func TestSnapshotRequiresTheBearerToken(t *testing.T) {
 		{"token with suffix", "/api/snapshot", "Bearer " + testToken + "x"},
 		{"wrong scheme", "/api/snapshot", "Basic " + testToken},
 		{"token in query string", "/api/snapshot?token=" + testToken, ""},
+		{"token in access_token parameter", "/api/snapshot?access_token=" + testToken, ""},
+		{"lowercase scheme", "/api/snapshot", "bearer " + testToken},
+		{"token as basic password", "/api/snapshot", "Basic " + base64.StdEncoding.EncodeToString([]byte("x:"+testToken))},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -147,7 +151,7 @@ func TestSnapshotWithTokenReturnsDataAndRefreshInterval(t *testing.T) {
 func TestUnknownHostIsRejectedOnEveryRoute(t *testing.T) {
 	h, snaps := newTestHandler(t)
 	for _, path := range []string{"/", "/app.js", "/api/snapshot"} {
-		for _, host := range []string{"evil.example:8123", "127.0.0.1:9999", "", "127.0.0.1"} {
+		for _, host := range []string{"evil.example:8123", "127.0.0.1:9999", "", "127.0.0.1", "LOCALHOST:8123", "localhost.:8123"} {
 			rec := do(h, http.MethodGet, path, host, "Bearer "+testToken)
 			if rec.Code != http.StatusMisdirectedRequest {
 				t.Errorf("GET %s Host=%q: status = %d, want 421", path, host, rec.Code)
@@ -156,6 +160,15 @@ func TestUnknownHostIsRejectedOnEveryRoute(t *testing.T) {
 	}
 	if snaps.calls != 0 {
 		t.Fatalf("rejected hosts triggered %d snapshots", snaps.calls)
+	}
+}
+
+func TestHostIsCheckedBeforeMethodAndPath(t *testing.T) {
+	h, _ := newTestHandler(t)
+	for _, c := range []struct{ method, path string }{{http.MethodPut, "/"}, {http.MethodGet, "/missing"}} {
+		if rec := do(h, c.method, c.path, "evil.example", ""); rec.Code != http.StatusMisdirectedRequest {
+			t.Errorf("%s %s with foreign Host: status = %d, want 421", c.method, c.path, rec.Code)
+		}
 	}
 }
 

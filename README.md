@@ -189,7 +189,7 @@ How it stays inside the same boundary as the server:
 - **Loopback only.** It listens on `127.0.0.1`, which is not configurable.
 - **Token for data.** `/api/snapshot` answers only `Authorization: Bearer <token>` (43 random characters, compared in constant time). The page and its assets hold no data.
 - **Browser hardening.** Requests with a `Host` other than `127.0.0.1:<port>` or `localhost:<port>` are refused (DNS rebinding). Only `GET` and `HEAD` are allowed. Every response sets a CSP with no inline script, `nosniff`, `no-referrer`, `DENY` framing and `no-store`.
-- **Bounded load.** One collection serves every open page for the refresh interval, and hidden tabs stop polling.
+- **Bounded load.** One collection serves every open page for the refresh interval; requests that arrive while it runs wait for it and share its result. Hidden tabs stop polling. As with the server, a tool call stuck past `--tool-timeout` (for example `statfs` on a dead NFS mount) keeps a goroutine blocked; the dashboard repeats calls every interval while a page is open, so such goroutines can accumulate until the mount recovers.
 
 ## Threat model
 

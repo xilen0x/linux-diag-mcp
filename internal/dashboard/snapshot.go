@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -76,6 +77,10 @@ type Collector struct {
 
 	mu   sync.Mutex
 	last *Snapshot
+	// gen counts finished collections. A caller that saw it change while
+	// waiting for mu reuses that collection, even when collecting took
+	// longer than maxAge, instead of starting another one.
+	gen atomic.Uint64
 }
 
 // NewCollector returns a collector that calls tools through caller.
@@ -84,12 +89,14 @@ func NewCollector(caller Caller, maxAge time.Duration) *Collector {
 }
 
 // Snapshot returns the cached snapshot, or collects a new one when it is
-// older than maxAge. Concurrent callers wait for a single collection.
-// The returned value is shared and must not be modified.
+// older than maxAge. Callers that arrive while a collection runs wait for
+// it and share its result. The returned value is shared and must not be
+// modified.
 func (c *Collector) Snapshot(ctx context.Context) *Snapshot {
+	seen := c.gen.Load()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.last != nil && c.now().Sub(c.last.CapturedAt) < c.maxAge {
+	if c.last != nil && (c.gen.Load() != seen || c.now().Sub(c.last.CapturedAt) < c.maxAge) {
 		return c.last
 	}
 	// The snapshot is shared by every page, so a request that goes away
@@ -97,6 +104,7 @@ func (c *Collector) Snapshot(ctx context.Context) *Snapshot {
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), collectTimeout)
 	defer cancel()
 	c.last = c.collect(cctx)
+	c.gen.Add(1)
 	return c.last
 }
 

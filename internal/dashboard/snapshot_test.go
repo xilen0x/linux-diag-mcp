@@ -275,3 +275,34 @@ func TestSnapshotSurvivesCanceledRequestContext(t *testing.T) {
 		t.Fatalf("errors = %v: a client that left must not poison the shared snapshot", s.Errors)
 	}
 }
+
+// slowCaller takes d per call, so a whole collection outlasts a short maxAge.
+type slowCaller struct {
+	mu sync.Mutex
+	n  int
+	d  time.Duration
+}
+
+func (s *slowCaller) CallTool(_ context.Context, p *mcp.CallToolParams) (*mcp.CallToolResult, error) {
+	s.mu.Lock()
+	s.n++
+	s.mu.Unlock()
+	time.Sleep(s.d)
+	return &mcp.CallToolResult{StructuredContent: map[string]any{"tool": p.Name}}, nil
+}
+
+func TestSnapshotWaitersReuseACollectionSlowerThanMaxAge(t *testing.T) {
+	sc := &slowCaller{d: 30 * time.Millisecond} // ~330 ms per collection
+	c := NewCollector(sc, 100*time.Millisecond)
+
+	var wg sync.WaitGroup
+	for range 3 {
+		wg.Go(func() { c.Snapshot(context.Background()) })
+		time.Sleep(10 * time.Millisecond)
+	}
+	wg.Wait()
+
+	if sc.n != len(calls) {
+		t.Fatalf("calls = %d, want %d (one collection for overlapping waiters)", sc.n, len(calls))
+	}
+}

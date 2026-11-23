@@ -94,13 +94,26 @@ func Collect(ctx context.Context, procFS fs.FS, statfs StatFunc) (Usage, error) 
 	if err != nil {
 		return Usage{}, err
 	}
-	done := make(chan Usage, 1) // buffered: an abandoned worker never blocks
-	go func() { done <- statAll(mounts, statfs) }()
+	type result struct {
+		u   Usage
+		err error
+	}
+	done := make(chan result, 1) // buffered: an abandoned worker never blocks
+	go func() {
+		// A panic in this goroutine is beyond any recover in the caller
+		// and would kill the process.
+		defer func() {
+			if p := recover(); p != nil {
+				done <- result{err: fmt.Errorf("statfs worker panicked: %v", p)}
+			}
+		}()
+		done <- result{u: statAll(mounts, statfs)}
+	}()
 	select {
 	case <-ctx.Done():
 		return Usage{}, ctx.Err()
-	case u := <-done:
-		return u, nil
+	case r := <-done:
+		return r.u, r.err
 	}
 }
 

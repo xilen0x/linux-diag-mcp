@@ -1,5 +1,8 @@
 // Package tools adapts collectors to MCP tools: schema, validation,
 // collector call and structured output. One function per tool.
+//
+// Every handler error goes through guard.Wrap: only wrapped errors reach
+// the client verbatim (see package guard).
 package tools
 
 import (
@@ -21,6 +24,7 @@ import (
 	"github.com/xilen0x/linux-diag-mcp/internal/collectors/procs"
 	"github.com/xilen0x/linux-diag-mcp/internal/collectors/sysinfo"
 	"github.com/xilen0x/linux-diag-mcp/internal/collectors/systemd"
+	"github.com/xilen0x/linux-diag-mcp/internal/guard"
 	"github.com/xilen0x/linux-diag-mcp/internal/validate"
 )
 
@@ -89,7 +93,7 @@ func AddSystemInfo(s *mcp.Server, d Deps) {
 		Annotations: readOnly("System information"),
 	}, func(_ context.Context, _ *mcp.CallToolRequest, _ NoInput) (*mcp.CallToolResult, sysinfo.Info, error) {
 		out, err := sysinfo.Collect(d.ProcFS, d.EtcFS)
-		return nil, out, err
+		return nil, out, guard.Wrap(err)
 	})
 }
 
@@ -101,7 +105,7 @@ func AddLoadAverage(s *mcp.Server, d Deps) {
 		Annotations: readOnly("Load average"),
 	}, func(_ context.Context, _ *mcp.CallToolRequest, _ NoInput) (*mcp.CallToolResult, loadavg.LoadAverage, error) {
 		out, err := loadavg.Collect(d.ProcFS)
-		return nil, out, err
+		return nil, out, guard.Wrap(err)
 	})
 }
 
@@ -113,7 +117,7 @@ func AddMemoryUsage(s *mcp.Server, d Deps) {
 		Annotations: readOnly("Memory usage"),
 	}, func(_ context.Context, _ *mcp.CallToolRequest, _ NoInput) (*mcp.CallToolResult, meminfo.Memory, error) {
 		out, err := meminfo.Collect(d.ProcFS)
-		return nil, out, err
+		return nil, out, guard.Wrap(err)
 	})
 }
 
@@ -129,7 +133,7 @@ func AddCPUUsage(s *mcp.Server, d Deps) {
 		Annotations: readOnly("CPU usage"),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ NoInput) (*mcp.CallToolResult, cpustat.Usage, error) {
 		out, err := cpustat.Collect(ctx, d.ProcFS, interval)
-		return nil, out, err
+		return nil, out, guard.Wrap(err)
 	})
 }
 
@@ -146,7 +150,7 @@ func AddDiskUsage(s *mcp.Server, d Deps) {
 		Annotations: readOnly("Disk usage"),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ NoInput) (*mcp.CallToolResult, disk.Usage, error) {
 		out, err := disk.Collect(ctx, d.ProcFS, statfs)
-		return nil, out, err
+		return nil, out, guard.Wrap(err)
 	})
 }
 
@@ -158,7 +162,7 @@ func AddNetworkInterfaces(s *mcp.Server, d Deps) {
 		Annotations: readOnly("Network interfaces"),
 	}, func(_ context.Context, _ *mcp.CallToolRequest, _ NoInput) (*mcp.CallToolResult, netdev.Interfaces, error) {
 		out, err := netdev.Collect(d.ProcFS)
-		return nil, out, err
+		return nil, out, guard.Wrap(err)
 	})
 }
 
@@ -189,10 +193,10 @@ func AddListeningPorts(s *mcp.Server, d Deps) {
 	}, func(_ context.Context, _ *mcp.CallToolRequest, in ListeningPortsInput) (*mcp.CallToolResult, netsock.Ports, error) {
 		proto, err := validate.ParseProtocol(in.Protocol)
 		if err != nil {
-			return nil, netsock.Ports{}, err
+			return nil, netsock.Ports{}, guard.Wrap(err)
 		}
 		out, err := netsock.Collect(d.ProcFS, proto)
-		return nil, out, err
+		return nil, out, guard.Wrap(err)
 	})
 }
 
@@ -240,16 +244,16 @@ func AddTopProcesses(s *mcp.Server, d Deps) {
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in TopProcessesInput) (*mcp.CallToolResult, procs.Result, error) {
 		sortBy, err := validate.ParseSortKey(in.SortBy)
 		if err != nil {
-			return nil, procs.Result{}, err
+			return nil, procs.Result{}, guard.Wrap(err)
 		}
 		limit, err := validate.Limit(in.Limit)
 		if err != nil {
-			return nil, procs.Result{}, err
+			return nil, procs.Result{}, guard.Wrap(err)
 		}
 		out, err := procs.Collect(ctx, d.ProcFS, procs.Options{
 			SortBy: sortBy, Limit: limit, Interval: interval, PageSize: pageSize, ClockTicks: clockTicks,
 		})
-		return nil, out, err
+		return nil, out, guard.Wrap(err)
 	})
 }
 
@@ -269,7 +273,7 @@ func AddFailedUnits(s *mcp.Server, d Deps) {
 		Annotations: readOnly("Failed units"),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ NoInput) (*mcp.CallToolResult, systemd.Failed, error) {
 		out, err := systemd.FailedUnits(ctx, dial)
-		return nil, out, err
+		return nil, out, guard.Wrap(err)
 	})
 }
 
@@ -301,9 +305,9 @@ func AddServiceStatus(s *mcp.Server, d Deps) {
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ServiceStatusInput) (*mcp.CallToolResult, systemd.Service, error) {
 		unit, err := validate.ParseUnitName(in.Unit)
 		if err != nil {
-			return nil, systemd.Service{}, err
+			return nil, systemd.Service{}, guard.Wrap(err)
 		}
 		out, err := systemd.ServiceStatus(ctx, dial, unit)
-		return nil, out, err
+		return nil, out, guard.Wrap(err)
 	})
 }

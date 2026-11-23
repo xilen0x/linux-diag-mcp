@@ -132,3 +132,13 @@ func TestCollectRejectsMalformed(t *testing.T) {
 		})
 	}
 }
+
+// statfs runs in a worker goroutine, outside the reach of any recover in
+// the caller: a panic there must become an error, not kill the process.
+func TestPanicInStatfsWorkerIsContained(t *testing.T) {
+	boom := func(string) (disk.Stat, error) { panic("statfs exploded") }
+	_, err := disk.Collect(context.Background(), fstest.MapFS{"mounts": {Data: []byte("/dev/a / ext4 rw 0 0\n")}}, boom)
+	if err == nil {
+		t.Fatal("panic in statfs was not reported as an error")
+	}
+}

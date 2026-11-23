@@ -68,7 +68,12 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	srv := server.New(server.Options{Version: version, Logger: logger})
+	srv := server.New(server.Options{
+		Version:        version,
+		Logger:         logger,
+		MaxOutputBytes: cfg.MaxOutputBytes,
+		ToolTimeout:    cfg.ToolTimeout,
+	})
 	tools.Register(srv, tools.Deps{
 		ProcFS:            os.DirFS("/proc"),
 		EtcFS:             os.DirFS("/etc"),

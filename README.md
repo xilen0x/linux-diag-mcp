@@ -1,6 +1,6 @@
 # linux-diag-mcp
 
-> **Status: work in progress (phase 4 of 8).** Implemented tools: `system_info`, `load_average`, `memory_usage`, `cpu_usage`.
+> **Status: work in progress (phase 5 of 8).** Implemented tools: `system_info`, `load_average`, `memory_usage`, `cpu_usage`, `disk_usage`, `network_interfaces`, `listening_ports`.
 
 A **read-only** [Model Context Protocol](https://modelcontextprotocol.io) server, written in Go, for diagnosing Linux systems. Security is the primary design requirement.
 

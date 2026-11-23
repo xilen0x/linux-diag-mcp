@@ -16,6 +16,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/xilen0x/linux-diag-mcp/internal/collectors/disk"
 	"github.com/xilen0x/linux-diag-mcp/internal/config"
 	"github.com/xilen0x/linux-diag-mcp/internal/sandbox"
 	"github.com/xilen0x/linux-diag-mcp/internal/server"
@@ -71,6 +72,7 @@ func run() error {
 		ProcFS:            os.DirFS("/proc"),
 		EtcFS:             os.DirFS("/etc"),
 		CPUSampleInterval: tools.DefaultCPUSampleInterval,
+		Statfs:            disk.SysStatfs,
 	})
 	logger.Info("starting", "name", server.Name, "version", version, "transport", "stdio",
 		"max_output_bytes", cfg.MaxOutputBytes, "tool_timeout", cfg.ToolTimeout)

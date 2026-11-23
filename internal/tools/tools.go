@@ -4,15 +4,21 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
 	"time"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/xilen0x/linux-diag-mcp/internal/collectors/cpustat"
+	"github.com/xilen0x/linux-diag-mcp/internal/collectors/disk"
 	"github.com/xilen0x/linux-diag-mcp/internal/collectors/loadavg"
 	"github.com/xilen0x/linux-diag-mcp/internal/collectors/meminfo"
+	"github.com/xilen0x/linux-diag-mcp/internal/collectors/netdev"
+	"github.com/xilen0x/linux-diag-mcp/internal/collectors/netsock"
 	"github.com/xilen0x/linux-diag-mcp/internal/collectors/sysinfo"
+	"github.com/xilen0x/linux-diag-mcp/internal/validate"
 )
 
 // DefaultCPUSampleInterval is the gap between the two /proc/stat samples.
@@ -27,6 +33,8 @@ type Deps struct {
 	EtcFS fs.FS
 	// CPUSampleInterval defaults to DefaultCPUSampleInterval when zero.
 	CPUSampleInterval time.Duration
+	// Statfs queries mounted filesystems; defaults to disk.SysStatfs when nil.
+	Statfs disk.StatFunc
 }
 
 // NoInput is the argument type of tools without parameters. As a struct it
@@ -40,6 +48,9 @@ func Register(s *mcp.Server, d Deps) {
 	AddLoadAverage(s, d)
 	AddMemoryUsage(s, d)
 	AddCPUUsage(s, d)
+	AddDiskUsage(s, d)
+	AddNetworkInterfaces(s, d)
+	AddListeningPorts(s, d)
 }
 
 // readOnly returns fresh annotations per tool (no shared mutable pointers).
@@ -103,6 +114,69 @@ func AddCPUUsage(s *mcp.Server, d Deps) {
 		Annotations: readOnly("CPU usage"),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ NoInput) (*mcp.CallToolResult, cpustat.Usage, error) {
 		out, err := cpustat.Collect(ctx, d.ProcFS, interval)
+		return nil, out, err
+	})
+}
+
+// AddDiskUsage registers disk_usage.
+func AddDiskUsage(s *mcp.Server, d Deps) {
+	statfs := d.Statfs
+	if statfs == nil {
+		statfs = disk.SysStatfs
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "disk_usage",
+		Description: "Size, usage and inode usage of mounted real filesystems " +
+			"(/proc/mounts + statfs); pseudo filesystems and squashfs images are excluded.",
+		Annotations: readOnly("Disk usage"),
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ NoInput) (*mcp.CallToolResult, disk.Usage, error) {
+		out, err := disk.Collect(ctx, d.ProcFS, statfs)
+		return nil, out, err
+	})
+}
+
+// AddNetworkInterfaces registers network_interfaces.
+func AddNetworkInterfaces(s *mcp.Server, d Deps) {
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "network_interfaces",
+		Description: "Per-interface traffic, error and drop counters since boot (/proc/net/dev).",
+		Annotations: readOnly("Network interfaces"),
+	}, func(_ context.Context, _ *mcp.CallToolRequest, _ NoInput) (*mcp.CallToolResult, netdev.Interfaces, error) {
+		out, err := netdev.Collect(d.ProcFS)
+		return nil, out, err
+	})
+}
+
+// ListeningPortsInput is the argument of listening_ports.
+type ListeningPortsInput struct {
+	Protocol string `json:"protocol" jsonschema:"transport protocol to inspect"`
+}
+
+// listeningPortsSchema adds the enum to the inferred schema so clients can
+// see the allowed values; the handler validates again regardless.
+func listeningPortsSchema() *jsonschema.Schema {
+	sch, err := jsonschema.For[ListeningPortsInput](nil)
+	if err != nil {
+		panic(fmt.Sprintf("listening_ports schema: %v", err)) // static type: programming error
+	}
+	sch.Properties["protocol"].Enum = []any{string(validate.ProtocolTCP), string(validate.ProtocolUDP)}
+	return sch
+}
+
+// AddListeningPorts registers listening_ports.
+func AddListeningPorts(s *mcp.Server, d Deps) {
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "listening_ports",
+		Description: "Local addresses and ports listening for TCP connections or bound UDP sockets, " +
+			"IPv4 and IPv6 (/proc/net). Sockets are not mapped to processes.",
+		Annotations: readOnly("Listening ports"),
+		InputSchema: listeningPortsSchema(),
+	}, func(_ context.Context, _ *mcp.CallToolRequest, in ListeningPortsInput) (*mcp.CallToolResult, netsock.Ports, error) {
+		proto, err := validate.ParseProtocol(in.Protocol)
+		if err != nil {
+			return nil, netsock.Ports{}, err
+		}
+		out, err := netsock.Collect(d.ProcFS, proto)
 		return nil, out, err
 	})
 }

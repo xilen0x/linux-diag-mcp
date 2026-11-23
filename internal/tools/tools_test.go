@@ -13,8 +13,11 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/xilen0x/linux-diag-mcp/internal/collectors/cpustat"
+	"github.com/xilen0x/linux-diag-mcp/internal/collectors/disk"
 	"github.com/xilen0x/linux-diag-mcp/internal/collectors/loadavg"
 	"github.com/xilen0x/linux-diag-mcp/internal/collectors/meminfo"
+	"github.com/xilen0x/linux-diag-mcp/internal/collectors/netdev"
+	"github.com/xilen0x/linux-diag-mcp/internal/collectors/netsock"
 	"github.com/xilen0x/linux-diag-mcp/internal/collectors/sysinfo"
 	"github.com/xilen0x/linux-diag-mcp/internal/server"
 	"github.com/xilen0x/linux-diag-mcp/internal/tools"
@@ -29,7 +32,14 @@ func fixtureDeps() tools.Deps {
 			"loadavg": {Data: []byte("0.50 0.25 0.10 2/300 4242\n")},
 			"meminfo": {Data: []byte("MemTotal: 1000 kB\nMemFree: 100 kB\nMemAvailable: 400 kB\n" +
 				"Buffers: 10 kB\nCached: 20 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n")},
-			"stat": {Data: []byte(stat)},
+			"stat":    {Data: []byte(stat)},
+			"mounts":  {Data: []byte("/dev/sda1 / ext4 rw 0 0\nproc /proc proc rw 0 0\n")},
+			"net/dev": {Data: []byte("h1\nh2\n    lo: 10 1 0 0 0 0 0 0 10 1 0 0 0 0 0 0\n")},
+			"net/tcp": {Data: []byte("hdr\n   0: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 1 1\n")},
+			"net/udp": {Data: []byte("hdr\n   0: 0100007F:0035 00000000:0000 07 00000000:00000000 00:00000000 00000000 0 0 1 1\n")},
+		},
+		Statfs: func(string) (disk.Stat, error) {
+			return disk.Stat{BlockSize: 1024, Blocks: 100, BlocksFree: 50, BlocksAvail: 50}, nil
 		},
 		EtcFS:             fstest.MapFS{"os-release": {Data: []byte("ID=testos\nNAME=\"Test OS\"\n")}},
 		CPUSampleInterval: time.Millisecond,
@@ -85,7 +95,8 @@ func TestToolsList(t *testing.T) {
 		}
 	}
 	sort.Strings(names)
-	want := []string{"cpu_usage", "load_average", "memory_usage", "system_info"}
+	want := []string{"cpu_usage", "disk_usage", "listening_ports", "load_average",
+		"memory_usage", "network_interfaces", "system_info"}
 	if len(names) != len(want) {
 		t.Fatalf("tools = %v, want %v", names, want)
 	}
@@ -153,7 +164,8 @@ func TestCallCPUUsage(t *testing.T) {
 
 func TestCallRejectsUnknownArguments(t *testing.T) {
 	cs := connect(t)
-	for _, name := range []string{"system_info", "load_average", "memory_usage", "cpu_usage"} {
+	for _, name := range []string{"system_info", "load_average", "memory_usage", "cpu_usage",
+		"disk_usage", "network_interfaces"} {
 		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
 			Name:      name,
 			Arguments: map[string]any{"path": "/etc/passwd"},
@@ -193,12 +205,17 @@ func TestCollectorErrorIsToolError(t *testing.T) {
 // race detector can catch shared state between handlers.
 func TestConcurrentCalls(t *testing.T) {
 	cs := connect(t)
-	names := []string{"system_info", "load_average", "memory_usage", "cpu_usage"}
+	names := []string{"system_info", "load_average", "memory_usage", "cpu_usage",
+		"disk_usage", "network_interfaces", "listening_ports"}
 	errs := make(chan error, 8*len(names))
 	for range 8 {
 		for _, name := range names {
 			go func() {
-				res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: name})
+				var args any
+				if name == "listening_ports" {
+					args = map[string]any{"protocol": "tcp"}
+				}
+				res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: name, Arguments: args})
 				if err == nil && res.IsError {
 					err = fmt.Errorf("%s: tool error %+v", name, res.Content)
 				}
@@ -211,4 +228,85 @@ func TestConcurrentCalls(t *testing.T) {
 			t.Error(err)
 		}
 	}
+}
+
+func TestCallDiskUsage(t *testing.T) {
+	var got disk.Usage
+	call(t, connect(t), "disk_usage", nil, &got)
+	if len(got.Filesystems) != 1 || got.Filesystems[0].MountPoint != "/" || got.Filesystems[0].UsedPercent != 50 {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestCallNetworkInterfaces(t *testing.T) {
+	var got netdev.Interfaces
+	call(t, connect(t), "network_interfaces", nil, &got)
+	if len(got.Interfaces) != 1 || got.Interfaces[0].Name != "lo" || got.Interfaces[0].RxBytes != 10 {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestCallListeningPorts(t *testing.T) {
+	cs := connect(t)
+	var tcp netsock.Ports
+	call(t, cs, "listening_ports", map[string]any{"protocol": "tcp"}, &tcp)
+	if tcp.Protocol != "tcp" || len(tcp.Listeners) != 1 || tcp.Listeners[0].Port != 22 {
+		t.Fatalf("tcp: got %+v", tcp)
+	}
+	var udp netsock.Ports
+	call(t, cs, "listening_ports", map[string]any{"protocol": "udp"}, &udp)
+	if udp.Protocol != "udp" || len(udp.Listeners) != 1 || udp.Listeners[0].Address != "127.0.0.1" {
+		t.Fatalf("udp: got %+v", udp)
+	}
+}
+
+func TestListeningPortsRejectsBadProtocol(t *testing.T) {
+	cs := connect(t)
+	for _, args := range []map[string]any{
+		nil,
+		{},
+		{"protocol": ""},
+		{"protocol": "TCP"},
+		{"protocol": "tcp6"},
+		{"protocol": "../../etc/passwd"},
+		{"protocol": 6},
+		{"protocol": []any{"tcp"}},
+		{"protocol": "tcp", "extra": true},
+	} {
+		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "listening_ports", Arguments: args})
+		if err == nil && !res.IsError {
+			t.Errorf("args %v accepted", args)
+		}
+	}
+}
+
+func TestListeningPortsSchemaAdvertisesEnum(t *testing.T) {
+	res, err := connect(t).ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range res.Tools {
+		if tool.Name != "listening_ports" {
+			continue
+		}
+		raw, _ := json.Marshal(tool.InputSchema)
+		var s struct {
+			Required   []string `json:"required"`
+			Properties map[string]struct {
+				Enum []string `json:"enum"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(raw, &s); err != nil {
+			t.Fatal(err)
+		}
+		enum := s.Properties["protocol"].Enum
+		if len(enum) != 2 || enum[0] != "tcp" || enum[1] != "udp" {
+			t.Fatalf("protocol enum = %v, want [tcp udp]; schema %s", enum, raw)
+		}
+		if len(s.Required) != 1 || s.Required[0] != "protocol" {
+			t.Fatalf("required = %v, want [protocol]", s.Required)
+		}
+		return
+	}
+	t.Fatal("listening_ports not listed")
 }

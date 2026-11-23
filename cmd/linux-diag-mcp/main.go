@@ -19,6 +19,7 @@ import (
 	"github.com/xilen0x/linux-diag-mcp/internal/config"
 	"github.com/xilen0x/linux-diag-mcp/internal/sandbox"
 	"github.com/xilen0x/linux-diag-mcp/internal/server"
+	"github.com/xilen0x/linux-diag-mcp/internal/tools"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=...".
@@ -66,6 +67,11 @@ func run() error {
 	defer stop()
 
 	srv := server.New(server.Options{Version: version, Logger: logger})
+	tools.Register(srv, tools.Deps{
+		ProcFS:            os.DirFS("/proc"),
+		EtcFS:             os.DirFS("/etc"),
+		CPUSampleInterval: tools.DefaultCPUSampleInterval,
+	})
 	logger.Info("starting", "name", server.Name, "version", version, "transport", "stdio",
 		"max_output_bytes", cfg.MaxOutputBytes, "tool_timeout", cfg.ToolTimeout)
 

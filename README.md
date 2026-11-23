@@ -1,6 +1,6 @@
 # linux-diag-mcp
 
-> **Status: work in progress (phase 2 of 8).** The server starts sandboxed and speaks MCP over stdio, but exposes no tools yet.
+> **Status: work in progress (phase 4 of 8).** Implemented tools: `system_info`, `load_average`, `memory_usage`, `cpu_usage`.
 
 A **read-only** [Model Context Protocol](https://modelcontextprotocol.io) server, written in Go, for diagnosing Linux systems. Security is the primary design requirement.
 
@@ -13,7 +13,7 @@ A **read-only** [Model Context Protocol](https://modelcontextprotocol.io) server
 - **Bounded output**: tools return structured JSON, truncated to a configurable size, with a timeout on every tool call.
 - **stdout is for the protocol only**: every log line goes to stderr.
 
-## Tools (planned, v1)
+## Tools (v1)
 
 | Tool | Parameters |
 |---|---|

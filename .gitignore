@@ -2,3 +2,6 @@
 *.test
 *.out
 coverage.*
+
+# Local agent tooling
+/.atl/

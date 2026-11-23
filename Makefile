@@ -3,6 +3,10 @@ PKG     := ./cmd/linux-diag-mcp
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
+# Use the toolchain pinned in go.mod even when a newer local Go is first in
+# PATH: analyzers like staticcheck must match the stdlib they parse.
+export GOTOOLCHAIN ?= $(shell sed -n 's/^toolchain //p' go.mod)
+
 .PHONY: build test lint run clean
 
 build:
